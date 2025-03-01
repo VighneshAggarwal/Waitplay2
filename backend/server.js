@@ -137,70 +137,158 @@ app.get('/product/:id', async (req, res) => {
 
 
 // API to Join a Cart
-app.post("/join-cart", (req, res) => {
+app.post("/join-cart", async (req, res) => {
   const { cartID } = req.body;
-  if (!carts[cartID]) {
-      return res.status(404).json({ message: "Cart not found" });
+
+  console.log(`Attempting to join cart: ${cartID}`);
+
+  if (!cartID) {
+      return res.status(400).json({ success: false, message: "Cart ID is required" });
   }
-  res.json({ message: "Joined cart successfully", cartID, items: carts[cartID].items });
+
+  // Assuming you're storing carts in memory or a database
+  const cart = carts[cartID]; // If using an in-memory object
+
+  if (!cart) {
+      console.log("Cart not found!");
+      return res.status(404).json({ success: false, message: "Cart not found" });
+  }
+
+  console.log(`Cart found:`, cart);
+
+  return res.json({ success: true, items: cart.items });
 });
+
 
 // WebSocket Logic for Real-Time Updates
 io.on("connection", (socket) => {
-  console.log("A user connected:", socket.id);
+    console.log("A user connected:", socket.id);
 
-  socket.on("join-cart", ({cartID, userID}) => {
-    
-    if(!userID || !cartID){
-      console.log("Error in userID and cartID");
-    }
-      socket.join(cartID);
-      console.log(`User ${userID} (${socket.id}) joined cart ${cartID}`);
+    socket.on("user-login", ({ userID }) => {
+        if (!userID) return;
 
-    console.log(carts[cartID]);
+        let existingCartID = Object.keys(carts).find(cartID => carts[cartID].users.includes(userID));
 
-    if(!carts[cartID]) {
-        carts[cartID] = { items: [], users: [] };
-    }
-    if (!carts[cartID].users.includes(userID)) {
-      carts[cartID].users.unshift(userID); // Latest user appears first
-    }
+        if (!existingCartID) {
+            existingCartID = uuidv4(); // Create a new cart if none exists
+            carts[existingCartID] = { items: [], users: [userID] };
+        } else {
+            if (!carts[existingCartID].users.includes(userID)) {
+                carts[existingCartID].users.push(userID);
+            }
+        }
 
-    io.to(cartID).emit("cartUpdated", carts[cartID]);
+        socket.join(existingCartID);
+        console.log(`User ${userID} auto-joined cart ${existingCartID}`);
 
+        // Send cart ID to user
+        socket.emit("cartAssigned", { cartID: existingCartID, items: carts[existingCartID].items });
+
+        io.to(existingCartID).emit("cartUpdated", carts[existingCartID]);
+    });
+
+    socket.on("join-cart", ({ cartID, userID }) => {
+        if (!userID || !cartID) {
+            console.log("Error in userID and cartID");
+            return;
+        }
+        socket.join(cartID);
+        console.log(`User ${userID} (${socket.id}) joined cart ${cartID}`);
+
+        console.log(carts[cartID]);
+
+        if (!carts[cartID]) {
+            carts[cartID] = { items: [], users: [] };
+        }
+        if (!carts[cartID].users.includes(userID)) {
+            carts[cartID].users.unshift(userID); // Latest user appears first
+        }
+
+        io.to(cartID).emit("cartUpdated", carts[cartID]);
+
+    });
+
+    socket.on("add-item", ({ cartID, userID, item }) => {
+      console.log(`Item added: ${item.title} (${item.type}) in cart ${cartID}`);
+  
+      if (!cartID || !userID || !item) {
+          console.log("Error: Missing cartID, userID, or item");
+          return;
+      }
+  
+      if (!carts[cartID]) {
+          carts[cartID] = { items: [], users: [] };
+      }
+  
+      // Find existing item in cart
+      const existingItem = carts[cartID].items.find(
+          (cartItem) => cartItem.item._id === item._id && cartItem.item.type === item.type
+      );
+  
+      if (existingItem) {
+          // If the item exists, increase the quantity
+          existingItem.quantity += item.quantity;
+      } else {
+          // If the item doesn't exist, add it to the cart
+          carts[cartID].items.push({ item: item, userID: userID, quantity: item.quantity });
+      }
+  
+      console.log(carts[cartID]);
+      io.to(cartID).emit("cartUpdated", carts[cartID]);  // Send updated cart to all users
   });
+  
 
-  socket.on("add-item", ({ cartID, userID, item }) => {
-    console.log(`Item added: ${item} in cart ${cartID}`);
+    socket.on("remove-item", ({ cartID, itemID, type }) => {
+        console.log(`Item removed: ${itemID} from cart ${cartID}`);
+
+        if (!cartID || !itemID) {
+            console.log("Error: Missing cartID or itemID");
+            return;
+        }
+
+        // Find the index of the item to remove
+        const itemIndex = carts[cartID].items.findIndex(item => item.item._id === itemID && item.item.type === type);
+
+        if (itemIndex > -1) {
+            // If the item is found, remove it from the cart
+            carts[cartID].items.splice(itemIndex, 1);
+
+            // Broadcast the removal to everyone in the same cart
+            io.to(cartID).emit("cartUpdated", carts[cartID]);
+        } else {
+            console.log(`Item with ID ${itemID} not found in cart ${cartID}`);
+        }
+    });
+
+    socket.on("update-cart", ({ cartID, item }) => {
+        if (!cartID || !item) {
+            console.log("Error: Missing cartID or item");
+            return;
+        }
     
-    if (!cartID || !userID || !item) {
-      console.log("Error: Missing cartID, userID, or itemID");
-      return;
-  }
+        if (!carts[cartID]) {
+            console.log(`Cart ${cartID} not found`);
+            return;
+        }
+    
+        // Find the item in the cart
+        const itemIndex = carts[cartID].items.findIndex(cartItem => cartItem.item._id === item._id && cartItem.item.type === item.type);
+    
+        if (itemIndex === -1) {
+            console.log(`Item ${item._id} not found in cart ${cartID}`);
+            return;
+        }
+    
+        // Update the quantity of the item
+        carts[cartID].items[itemIndex].quantity = item.quantity;
+    
+        console.log(`Cart ${cartID} updated:`, carts[cartID]);
+        io.to(cartID).emit("cartUpdated", carts[cartID]);
+    });
 
-  if (!carts[cartID]) {
-    carts[cartID] = { item: [], users: [] };
-  }
-
-  carts[cartID].items.push({item: item, userID});
-
-  console.log(carts[cartID]);
-  io.to(cartID).emit("cartUpdated", carts[cartID]);
-});
-
-socket.on("remove-item", ({ cartID, itemID }) => {
-    console.log(`Item removed: ${itemID} from cart ${cartID}`);
-
-    // Remove the item from the cart in the carts object
-    carts[cartID].items = carts[cartID].items.filter(item => item.productId !== itemID);
-
-    // Broadcast the removal to everyone in the same cart
-    io.to(cartID).emit("cartUpdated", carts[cartID]);
-});
-
-  socket.on("disconnect", () => {
-      console.log("A user disconnected:", socket.id);
-  });
+    socket.on("disconnect", () => {
+        console.log("A user disconnected:", socket.id);
+    });
 });
 
 

@@ -51,32 +51,61 @@ const ItemsPage = () => {
     useEffect(() => {
         if (!cartID || !userID) return;
     
-        socket.emit("join-cart", {cartID, userID});
-        console.log(`abcd User ${userID} joined the cart ${cartID}`);
-        console.log(cart); // Log the cart to debug
+        console.log("Running useEffect for join-cart", { cartID, userID });
     
-        // Listen for updates
-        socket.on("update-cart", (data) => {
+        // Emit join event only once per cartID
+        socket.emit("join-cart", { cartID, userID });
+        console.log(`User ${userID} joined cart ${cartID}`);
+    
+        const handleCartUpdate = (data) => {
             console.log("Received cart update event:", data);
     
-            if (data.action === "add") {
-                console.log("aaaaaa" ,data.items);
-                setCart(data.items); // Add new item
-            // } else if (data.action === "remove") {
-            //     setCart((prev) => prev.filter(item => item.id !== data.itemID)); // Remove item
+            if (!Array.isArray(data.items)) {
+                console.error("Received data is not an array:", data.items);
+                return;
             }
     
-            if (Array.isArray(data.items)) {
-                setCart(data.items); // Update with the correct array
-            } else {
-                console.error("Received data is not an array:", data.items);
-            }
-        });
+            setCart((prevCart) => {
+                const uniqueItems = [...new Map([...prevCart, ...data.items].map(item => [item.id, item])).values()];
+                return uniqueItems;
+            });
+        };
+    
+        // Prevent duplicate listeners
+        socket.off("update-cart", handleCartUpdate);
+        socket.on("update-cart", handleCartUpdate);
     
         return () => {
-            socket.off("update-cart"); // Cleanup
+            socket.off("update-cart", handleCartUpdate);
         };
-    }, [cartID, userID, cart]);    
+    }, [cartID]); // Runs only when cartID is set
+    
+
+    useEffect(() => {
+        if (!userID) return;
+    
+        const initializeCart = async () => {
+            if (cartID) return; // Prevent unnecessary calls
+    
+            let storedCartID = localStorage.getItem("cartID");
+    
+            if (!storedCartID) {
+                try {
+                    const response = await axios.post("http://localhost:5001/create-cart");
+                    storedCartID = response.data.cartID;
+                    localStorage.setItem("cartID", storedCartID);
+                } catch (error) {
+                    console.error("Error creating cart:", error);
+                    return;
+                }
+            }
+    
+            setCartID(storedCartID); // Save cart ID but do NOT auto-join
+        };
+    
+        initializeCart();
+    }, [userID]); // Runs only when user logs in
+    
 
     useEffect(() => {
         axios
@@ -197,12 +226,22 @@ const ItemsPage = () => {
     const handleCreateCart = async () => {
         try {
             const response = await axios.post("http://localhost:5001/create-cart");
-            setCartID(response.data.cartID);
-            socket.emit("joinCart", response.data.cartID); // Join WebSocket room
+    
+            if (response.data.cartID) {
+                setCartID(response.data.cartID);
+                setItems([]); // Reset items when creating a new cart
+                
+                socket.emit("join-cart", { cartID: response.data.cartID, userID });
+    
+                console.log(`User ${userID} created and joined cart ${response.data.cartID}`);
+            } else {
+                console.error("Cart creation failed:", response.data.message);
+            }
         } catch (error) {
             console.error("Error creating cart:", error);
         }
     };
+    
 
     // const [products, setProducts] = useState({});
     const [newItems, setnewItems] = useState();
@@ -252,16 +291,27 @@ const ItemsPage = () => {
     
     // Function to Join an Existing Cart
     const handleJoinCart = async () => {
-        if (!inputCartID) return alert('Please enter a Cart ID');
+        if (!inputCartID.trim()) return alert("Please enter a valid Cart ID");
+    
         try {
             const response = await axios.post("http://localhost:5001/join-cart", { cartID: inputCartID });
-            setCartID(inputCartID);
-            setItems(response.data.items);
-            socket.emit("joinCart", inputCartID); // Join WebSocket room
+    
+            console.log("Join Cart Response:", response.data); // Debugging
+    
+            if (response.data.success) {
+                setCartID(inputCartID);
+                setItems(response.data.items);
+                socket.emit("joinCart", inputCartID);
+                console.log("Successfully joined cart:", inputCartID);
+            } else {
+                alert(response.data.message || "Failed to join cart.");
+            }
         } catch (error) {
             console.error("Error joining cart:", error);
+            alert("Error joining cart. Please try again.");
         }
     };
+    
 
     // Handle adding items
     const addItem = (item) => {
@@ -311,6 +361,8 @@ const ItemsPage = () => {
         console.log("jahdjahsd", calculateTotalQuantity(newItems));
         setTotalQuantity(calculateTotalQuantity(newItems));
     }, [newItems]);
+
+
     // Function to Add/Remove Items in Cart
     const handleQuantityChange = (productId, type, delta, title, price) => {
         if (!productId || !type) {
@@ -322,27 +374,24 @@ const ItemsPage = () => {
             const key = `${productId}-${type}`;
             const existingProduct = prevCart.find((item) => item._id === productId && item.type === type);
             let newCart;
+            let updatedItem = null; // Ensure updatedItem is explicitly null when the item is removed
     
             if (existingProduct) {
                 const newQuantity = Math.max(existingProduct.quantity + delta, 0);
     
                 if (newQuantity === 0) {
+                    // Remove the item completely
                     newCart = prevCart.filter((item) => !(item._id === productId && item.type === type));
-                    removeItem(productId);
+                    removeItem(productId); 
                 } else {
                     newCart = prevCart.map((item) =>
                         item._id === productId && item.type === type
                             ? { ...item, quantity: newQuantity }
                             : item
                     );
-                    if(delta>0){
-                        addItem(productId);
-                    }
-                    else{
-                        removeItem(productId);
-                    }
+                    updatedItem = newCart.find((item) => item._id === productId && item.type === type);
                 }
-            } else {
+            } else if (delta > 0) {
                 const product = products.find((prod) => prod._id === productId);
                 if (!product) {
                     console.error("Product not found:", productId);
@@ -355,32 +404,32 @@ const ItemsPage = () => {
                         _id: productId,
                         title: title || product.title,
                         type,
-                        price: price || (type === "Half" ? product.halfPrice : product.fullPrice),
+                        price: type === 'Half' ? product.halfPrice : product.fullPrice,
                         quantity: 1,
                     },
                 ];
+                updatedItem = newCart.find((item) => item._id === productId && item.type === type);
                 addItem(productId);
+            } else {
+                return prevCart; // If delta is negative but item doesn't exist, return unchanged cart
             }
     
-            // Always emit WebSocket update whenever quantity changes
             if (cartID) {
-                const updatedItem = newCart.find((i) => i._id === productId && i.type === type);
                 socket.emit("update-cart", {
                     cartID,
                     item: updatedItem
                         ? {
-                              _id: updatedItem._id,
-                              title: updatedItem.title || "Unknown",  // Ensure title is present
-                              type: updatedItem.type,
-                              price: updatedItem.price || 0,  // Ensure price is present
-                              quantity: updatedItem.quantity,
-                          }
-                        : { productId, type, quantity: 0 }, // Ensure removal is also sent
+                            _id: updatedItem._id,
+                            title: updatedItem.title || "Unknown",
+                            type: updatedItem.type,
+                            price: updatedItem.price || 0,
+                            quantity: updatedItem.quantity,
+                        }
+                        : { productId, type, quantity: 0 }, // Ensure proper removal
                 });
-                
+    
                 console.log("Emitting update-cart:", updatedItem);
-
-                // Log for debugging
+    
                 console.log(`WebSocket Event: update-cart`, {
                     cartID,
                     item: updatedItem || { productId, type, quantity: 0 },
@@ -389,13 +438,13 @@ const ItemsPage = () => {
     
             setQuantityState((prevState) => ({
                 ...prevState,
-                [key]: newCart.find((i) => i._id === productId && i.type === type)?.quantity || 0,
+                [key]: updatedItem?.quantity || 0,
             }));
     
             return newCart;
         });
     };    
-    
+
 
     const toggleOrderSummary = () => {
         setShowOrderSummary(!showOrderSummary);
@@ -434,60 +483,138 @@ const ItemsPage = () => {
 
     return (
         <div className="app-container">
-            <header className="header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 20px', background: '#fff', boxShadow: '0px 1px 5px rgba(0, 0, 0, 0.1)' }}>
-    {/* Logo Section */}
-    <div className="logo" style={{ display: 'flex', alignItems: 'center', gap: '10px', marginLeft:"4%" }}>
-        <img
-            src="https://via.placeholder.com/40"
-            alt="Logo"
-            style={{ width: '40px', height: '40px', borderRadius: '5px' }}
-        />
-        <span style={{ fontSize: '20px', fontWeight: 'bold', color: '#333' }}>Logo</span>
-    </div>
-
-    {/* Share or Join Cart Button */}
-    <button
-    onClick={openCartModal}
-        style={{
-            background: 'linear-gradient(to right, #f54ea2, #ff7676)',
-            border: 'none',
-            padding: '10px 20px',
-            borderRadius: '20px',
-            color: '#fff',
-            fontSize: '14px',
-            cursor: 'pointer',
-            fontWeight: 'bold',
-            paddingRight: "4%",
-            marginRight:"3%",
-        }}
-    >
-        Share or Join Cart
-    </button>
-</header>
-{/*  Cart Modal */}
+          <header className="header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 20px', background: '#fff', boxShadow: '0px 1px 5px rgba(0, 0, 0, 0.1)' }}>
+            {/* Logo Section */}
+            <div className="logo" style={{ display: 'flex', alignItems: 'center', gap: '10px', marginLeft: "4%" }}>
+              <img
+                src="https://via.placeholder.com/40"
+                alt="Logo"
+                style={{ width: '40px', height: '40px', borderRadius: '5px' }}
+              />
+              <span style={{ fontSize: '20px', fontWeight: 'bold', color: '#333' }}>Logo</span>
+            </div>
+    
+            {/* Share or Join Cart Button */}
+            <button
+              onClick={openCartModal}
+              style={{
+                background: 'linear-gradient(to right, #f54ea2, #ff7676)',
+                border: 'none',
+                padding: '10px 20px',
+                borderRadius: '20px',
+                color: '#fff',
+                fontSize: '14px',
+                cursor: 'pointer',
+                fontWeight: 'bold',
+                marginRight: "3%",
+              }}
+            >
+              Share or Join Cart
+            </button>
+          </header>
+    
+          {/* Cart Modal */}
 {isCartModalOpen && (
-                <div className="modal">
-                    <div className="modal-content">
-                        <h2>Share or Join Cart</h2>
-                        {!cartID ? (
-                            <>
-                                <button onClick={handleCreateCart}>Create & Share Cart</button>
-                                <hr />
-                                <input
-                                    type="text"
-                                    placeholder="Enter Cart ID"
-                                    value={inputCartID}
-                                    onChange={(e) => setInputCartID(e.target.value)}
-                                />
-                                <button onClick={handleJoinCart}>Join Cart</button>
-                            </>
-                        ) : (
-                            <p>Your Cart ID: <strong>{cartID}</strong></p>
-                        )}
-                        <button onClick={closeCartModal}>Close</button>
-                    </div>
-                </div>
-            )}
+  <div
+    className="modal"
+    style={{
+      position: "fixed",
+      top: 0,
+      left: 0,
+      width: "100%",
+      height: "100%",
+      background: "rgba(0, 0, 0, 0.5)",
+      display: "flex",
+      justifyContent: "center",
+      alignItems: "center",
+    }}
+  >
+    <div
+      className="modal-content"
+      style={{
+        background: "#fff",
+        padding: "20px",
+        borderRadius: "10px",
+        width: "300px",
+        textAlign: "center",
+      }}
+    >
+      <h2>Share or Join Cart</h2>
+
+      {/* Always show Create & Share Cart button */}
+      <button
+        onClick={handleCreateCart}
+        style={{
+          padding: "10px",
+          background: "#28a745",
+          color: "#fff",
+          border: "none",
+          borderRadius: "5px",
+          cursor: "pointer",
+          marginBottom: "10px",
+          width: "100%",
+        }}
+      >
+        Create & Share Cart
+      </button>
+
+      <hr />
+
+      {/* Always show Join Cart input and button */}
+      <input
+        type="text"
+        placeholder="Enter Cart ID"
+        value={inputCartID}
+        onChange={(e) => setInputCartID(e.target.value)}
+        style={{
+          padding: "8px",
+          width: "80%",
+          marginBottom: "10px",
+          textAlign: "center",
+        }}
+      />
+      <button
+        onClick={handleJoinCart}
+        style={{
+          padding: "10px",
+          background: "#007bff",
+          color: "#fff",
+          border: "none",
+          borderRadius: "5px",
+          cursor: "pointer",
+          width: "100%",
+        }}
+      >
+        Join Cart
+      </button>
+
+      {/* Show Cart ID if already in a cart */}
+      {cartID && (
+        <p style={{ marginTop: "10px" }}>
+          Your Cart ID: <strong>{cartID}</strong>
+        </p>
+      )}
+
+      {/* Close button */}
+      <button
+        onClick={closeCartModal}
+        style={{
+          marginTop: "10px",
+          padding: "10px",
+          background: "#dc3545",
+          color: "#fff",
+          border: "none",
+          borderRadius: "5px",
+          cursor: "pointer",
+          width: "100%",
+        }}
+      >
+        Close
+      </button>
+    </div>
+  </div>
+)}
+
 
 
 <div className="search-and-call" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 20px', background: '#000', color: '#fff', marginTop: '-1px', width:"100%" }}>
@@ -539,7 +666,7 @@ const ItemsPage = () => {
 </div>
 
 
-            <div className="banner-container" onTouchStart={handleManualScroll} onMouseDown={handleManualScroll}>
+            {/* <div className="banner-container" onTouchStart={handleManualScroll} onMouseDown={handleManualScroll}>
                 <div className="banner-carousel" ref={bannerRef}>
                     <div className="banner-item">
                         <img src="https://content.wepik.com/statics/740676612/preview-page0.jpg" alt="Banner 1" className="banner-image" />
@@ -551,7 +678,7 @@ const ItemsPage = () => {
                         <img src="https://img.freepik.com/free-vector/flat-design-food-sale-background_23-2149167390.jpg" alt="Banner 3" className="banner-image" />
                     </div>
                 </div>
-            </div>
+            </div> */}
 
             <div className="filter-container" style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-start', gap: '10px', marginLeft: '0', paddingLeft: '0', width: '90%' }}>
     <div className="dropdown" style={{ position: 'relative', marginRight: '30px' }}>
@@ -676,9 +803,9 @@ const ItemsPage = () => {
                             }}
                         >
                             <span>Half</span>
-                            <button onClick={() => handleQuantityChange(product._id, 'Half', -1, product.title, product.halfPrice)}>-</button>
-                            <span>{quantityState[halfKey] || 0}</span>
-                            <button onClick={() => handleQuantityChange(product._id, 'Half', 1, product.title, product.halfPrice)}>+</button>
+                                <button onClick={() => handleQuantityChange(product._id, 'Half', -1, product.title, product.halfPrice)}>-</button>
+                                <span>{quantityState[halfKey] || 0}</span>
+                                <button onClick={() => handleQuantityChange(product._id, 'Half', 1, product.title, product.halfPrice)}>+</button>
                         </div>
 
                         <div
@@ -783,7 +910,7 @@ const ItemsPage = () => {
                                 </tr>
                             </thead>
                             <tbody>
-                                {Object.entries(
+                            {Object.entries(
                                     cartItems.reduce((acc, { item, userID }) => {
                                         if (!acc[userID]) {
                                             acc[userID] = [];
@@ -798,20 +925,28 @@ const ItemsPage = () => {
                                                 <strong>User: {userID}</strong>
                                             </td>
                                         </tr>
-                                        {items.map((item_id, index) => (
-                                            newItems[item_id] ? (
+                                        {items.map((item_id, index) => {
+                                            const item = newItems[item_id];
+                                            if (!item) {
+                                                return (
+                                                    <tr key={`${userID}-${item_id}-loading`}>
+                                                        <td colSpan="4">Loading product details...</td>
+                                                    </tr>
+                                                );
+                                            }
+                                            const quantityKey = `${item._id}-${item.type}`;
+                                            return (
                                                 <tr key={`${userID}-${item_id}`}>
-                                                    <td></td> {/* Empty cell for spacing */}
-                                                    <td>{index + 1}. {newItems[item_id].title} ({newItems[item_id].type})</td>
-                                                    <td>{newItems[item_id].newQuantity ?? "N/A"}</td>
-                                                    <td>₹{newItems[item_id].fullPrice}</td>
+                                                    <td>{index + 1}. {item.title} ({item.type})</td>
+                                                    <td className="quantity-controls">
+                                                        <button onClick={() => handleQuantityChange(item._id, item.type, -1)} className="sPlus">-</button>
+                                                        <span>{quantityState[quantityKey] || 0}</span>
+                                                        <button onClick={() => handleQuantityChange(item._id, item.type, 1)} className="sMinus">+</button>
+                                                    </td>
+                                                    <td>₹{item.fullPrice}</td>
                                                 </tr>
-                                            ) : (
-                                                <tr key={`${userID}-${item_id}-loading`}>
-                                                    <td colSpan="4">Loading product details...</td>
-                                                </tr>
-                                            )
-                                        ))}
+                                            );
+                                        })}
                                     </React.Fragment>
                                 ))}
                             </tbody>
