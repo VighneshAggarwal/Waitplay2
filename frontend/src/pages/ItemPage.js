@@ -179,11 +179,15 @@ const ItemsPage = () => {
     
             if (existingIndex !== -1) {
                 // If item exists, update its quantity
-                newCart = newCart.map((item, index) =>
-                    index === existingIndex
-                        ? { ...item, quantity: Math.max(item.quantity + delta, 1) } // Ensure minimum quantity = 1
-                        : item
-                );
+                const updatedQuantity = Math.max(newCart[existingIndex].quantity + delta, 0);
+    
+                if (updatedQuantity === 0) {
+                    // Remove item if quantity reaches 0
+                    newCart.splice(existingIndex, 1);
+                    removeItem(productId, type);
+                } else {
+                    newCart[existingIndex] = { ...newCart[existingIndex], quantity: updatedQuantity };
+                }
             } else if (delta > 0) {
                 // If item doesn't exist, add it with quantity = 1
                 const product = products.find((prod) => prod._id === productId);
@@ -212,13 +216,48 @@ const ItemsPage = () => {
             // Update quantity state for UI display
             setQuantityState((prevState) => ({
                 ...prevState,
-                [key]: newCart.find((item) => item._id === productId && item.type === type)?.quantity || 1,
+                [key]: newCart.find((item) => item._id === productId && item.type === type)?.quantity || 0,
             }));
     
             return newCart;
         });
+    
+        // Update the cartItems state to reflect the changes
+        setCartItems((prevCartItems) => {
+            const updatedCartItems = [...prevCartItems];
+            const itemIndex = updatedCartItems.findIndex(
+                (cartItem) => cartItem.item._id === productId && cartItem.item.type === type
+            );
+    
+            if (itemIndex !== -1) {
+                updatedCartItems[itemIndex].quantity += delta;
+                if (updatedCartItems[itemIndex].quantity <= 0) {
+                    updatedCartItems.splice(itemIndex, 1); // Remove item if quantity is zero
+                }
+            } else if (delta > 0) {
+                const product = products.find((prod) => prod._id === productId);
+                if (product) {
+                    updatedCartItems.push({
+                        item: {
+                            _id: productId,
+                            title: product.title,
+                            type,
+                            price: type === 'Half' ? product.halfPrice : product.fullPrice,
+                        },
+                        quantity: 1,
+                    });
+                }
+            }
+    
+            return updatedCartItems;
+        });
     };
     
+    // Calculate total quantity whenever cart changes
+    useEffect(() => {
+        const total = cart.reduce((sum, item) => sum + item.quantity, 0);
+        setTotalQuantity(total);
+    }, [cart]);
 
     // Function to create a new cart
     const handleCreateCart = async () => {
@@ -689,53 +728,31 @@ const ItemsPage = () => {
         </tr>
     </thead>
     <tbody>
-        {Object.entries(
-            cartItems.reduce((acc, { item, userID }) => {
-                if (!acc[userID]) acc[userID] = [];
-                acc[userID].push(item);
+        {Object.values(
+            cartItems.reduce((acc, { item }) => {
+                const key = `${item._id}-${item.type}`;
+                if (!acc[key]) {
+                    acc[key] = { ...item, quantity: 0 };
+                }
+                acc[key].quantity += item.quantity;
                 return acc;
             }, {})
-        ).map(([userID, items]) => (
-            <React.Fragment key={`user-${userID}`}>
-                {/* User Row */}
-                <tr>
-                    <td colSpan="4">
-                        <strong>User: {userID}</strong>
+        ).map((item) => {
+            const quantityKey = `${item._id}-${item.type}`;
+            return (
+                <tr key={`item-${item._id}-${item.type}`}>
+                    <td>{item.title} ({item.type})</td>
+                    <td className="quantity-controls">
+                        <button onClick={() => handleQuantityChange(item._id, item.type, -1)}>-</button>
+                        <span>{quantityState[quantityKey] || item.quantity}</span>
+                        <button onClick={() => handleQuantityChange(item._id, item.type, 1)}>+</button>
                     </td>
+                    <td>₹{item.price}</td>
                 </tr>
-
-                {/* Item Rows */}
-                {items.map((item, index) => {
-                    const itemId = item?._id;
-                    if (!itemId) return null;
-
-                    const itemDetails = newItems[itemId];
-                    if (!itemDetails) {
-                        return (
-                            <tr key={`loading-${userID}-${itemId}-${index}`}>
-                                <td colSpan="4">Loading product details...</td>
-                            </tr>
-                        );
-                    }
-
-                    const quantityKey = `${itemDetails._id}-${itemDetails.type}`;
-
-                    return (
-                        <tr key={`item-${userID}-${itemId}-${itemDetails.type}-${index}`}>
-                            <td>{userID}</td>
-                            <td>{itemDetails.title} ({itemDetails.type})</td>
-                            <td className="quantity-controls">
-                                <button onClick={() => handleQuantityChange(itemDetails._id, itemDetails.type, -1)}>-</button>
-                                <span>{quantityState[quantityKey] || 1}</span>
-                                <button onClick={() => handleQuantityChange(itemDetails._id, itemDetails.type, 1)}>+</button>
-                            </td>
-                            <td>₹{itemDetails.price}</td>
-                        </tr>
-                    );
-                })}
-            </React.Fragment>
-        ))}
+            );
+        })}
     </tbody>
+
 </table>
 
 
